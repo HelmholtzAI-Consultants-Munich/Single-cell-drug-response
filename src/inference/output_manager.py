@@ -6,12 +6,13 @@ with proper directory structure and file naming conventions.
 """
 
 import numpy as np
-from typing import Dict, Any, Optional, Union, List
+from typing import Dict, Any, Optional, Union
 from pathlib import Path
 import logging
 import json
-import tifffile as tiff
 from datetime import datetime
+
+from src.utils.image_utils import LABEL_FORMATS, save_labels, load_labels
 
 try:
     import matplotlib
@@ -37,21 +38,32 @@ class OutputManager:
         base_output_dir: Union[str, Path],
         model_name: str = "",
         dataset_name: str = "test",
-        create_subdirs: bool = True
+        create_subdirs: bool = True,
+        label_format: str = "zarr",
+        pred_mask_suffix: str = "_pred_mask"
     ):
         """
         Initialize output manager.
-        
+
         Args:
             base_output_dir: Base directory for all outputs
             model_name: Name of the model used for predictions
             dataset_name: Name of the dataset being processed
             create_subdirs: Whether to create subdirectories for different output types
+            label_format: Format for saving segmentation labels. One of
+                ``"tif"``, ``"zarr"`` (default), or ``"hdf5"``.
+            pred_mask_suffix: Suffix for prediction mask files
         """
+        if label_format not in LABEL_FORMATS:
+            raise ValueError(f"label_format must be one of {list(LABEL_FORMATS)}; got {label_format!r}")
+        self.label_format = label_format
+        self._label_ext = LABEL_FORMATS[label_format]
+
         self.base_output_dir = Path(base_output_dir)
         self.model_name = model_name
         self.dataset_name = dataset_name
         self.create_subdirs = create_subdirs
+        self.pred_mask_suffix = pred_mask_suffix
         
         # Create main output directory: {out_dir}/{model_name}/{dataset}
         self.output_dir = self.base_output_dir / model_name / dataset_name
@@ -88,7 +100,6 @@ class OutputManager:
         metadata: Dict[str, Any],
         input_path: Union[str, Path],
         original_image: Optional[np.ndarray] = None,
-        suffix: str = "_masks",
         save_overlay: bool = True,
         save_metadata: bool = True
     ) -> Dict[str, Path]:
@@ -109,12 +120,13 @@ class OutputManager:
         """
         input_path = Path(input_path)
         base_name = self._get_output_filename(input_path)
+        suffix = self.pred_mask_suffix
         
         saved_files = {}
         
         try:
             # Save masks
-            mask_path = self.masks_dir / f"{base_name}{suffix}.tif"
+            mask_path = self.masks_dir / f"{base_name}{suffix}{self._label_ext}"
             self._save_masks(masks, mask_path)
             saved_files['masks'] = mask_path
             
@@ -175,7 +187,7 @@ class OutputManager:
         saved_files = {'stack': {}, 'slices': []}
         
         # Save entire stack
-        stack_path = self.masks_dir / f"{base_name}_stack.tif"
+        stack_path = self.masks_dir / f"{base_name}_stack{self._label_ext}"
         self._save_masks(masks_stack, stack_path)
         saved_files['stack']['masks'] = stack_path
         
@@ -191,7 +203,7 @@ class OutputManager:
                 slice_masks = masks_stack[z_idx]
                 slice_name = f"{base_name}_z{z_idx:03d}"
                 
-                slice_path = self.masks_dir / f"{slice_name}_masks.tif"
+                slice_path = self.masks_dir / f"{slice_name}_masks{self._label_ext}"
                 self._save_masks(slice_masks, slice_path)
                 
                 slice_info = {'z_index': z_idx, 'masks': slice_path}
@@ -262,22 +274,18 @@ class OutputManager:
         return base_name
     
     def _save_masks(self, masks: np.ndarray, output_path: Path) -> None:
-        """Save segmentation masks as TIFF file."""
+        """Save segmentation masks using the configured label format."""
         try:
-            # Ensure masks are in appropriate format
-            if masks.dtype != np.uint16 and masks.dtype != np.uint32:
-                # Convert to uint16 if possible, otherwise uint32
-                max_val = np.max(masks)
-                if max_val <= np.iinfo(np.uint16).max:
-                    masks = masks.astype(np.uint16)
-                else:
-                    masks = masks.astype(np.uint32)
-            
-            tiff.imwrite(output_path, masks, compression='lzw')
-            
+            save_labels(masks, output_path)
+
         except Exception as e:
             logging.error(f"Failed to save masks to {output_path}: {e}")
             raise
+
+    @staticmethod
+    def load_masks(path: Union[str, Path]) -> np.ndarray:
+        """Load segmentation masks from tif, zarr, or hdf5 file."""
+        return load_labels(Path(path))
     
     def _save_overlay(
         self,
